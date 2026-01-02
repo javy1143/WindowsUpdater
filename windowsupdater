@@ -33,7 +33,6 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
         <TextBlock Name="StatusLabel" Grid.Row="2" Text="Ready" Foreground="Blue" Margin="0,10,0,0" FontWeight="SemiBold"/>
 
         <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
-            <Button Name="BtnReboot" Content="REBOOT NOW" Width="130" Height="30" Margin="5" Background="Red" Foreground="White" FontWeight="Bold" Visibility="Collapsed"/>
             <Button Name="BtnRecommend" Content="Recommend" Width="110" Height="30" Margin="5"/>
             <Button Name="BtnSelectAll" Content="Select All" Width="110" Height="30" Margin="5"/>
             <Button Name="BtnInstall" Content="Install Selected" Width="130" Height="30" Margin="5" Background="#FF4CAF50" Foreground="White" FontWeight="Bold"/>
@@ -46,17 +45,15 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $Window = [Windows.Markup.XamlReader]::Load($reader)
 
-# Sync table to share data between threads
+# Sync table to share data between the GUI thread and Background thread
 $Sync = [hashtable]::Synchronized(@{
     Window      = $Window
     StatusLabel = $Window.FindName("StatusLabel")
     UpdateList  = $Window.FindName("UpdateList")
     BtnInstall  = $Window.FindName("BtnInstall")
-    BtnReboot   = $Window.FindName("BtnReboot")
 })
 
 # --- Fetch Updates ---
-Write-Host "Searching for updates..." -ForegroundColor Cyan
 $UpdateSession = New-Object -ComObject Microsoft.Update.Session
 $UpdateSearcher = $UpdateSession.CreateUpdateSearcher()
 $SearchResult = $UpdateSearcher.Search("IsInstalled=0 and IsHidden=0")
@@ -70,24 +67,16 @@ $Sync.UpdateList.ItemsSource = $UpdateCollection
 
 # --- Button Logic ---
 
-# Reboot Logic
-$Sync.BtnReboot.Add_Click({
-    Restart-Computer -Force
-})
-
-# Recommend Selection Logic
 $Window.FindName("BtnRecommend").Add_Click({
     foreach ($item in $UpdateCollection) { $item.IsSelected = ($item.Category -match "Security|Critical") }
     $Sync.UpdateList.Items.Refresh()
 })
 
-# Select All Logic
 $Window.FindName("BtnSelectAll").Add_Click({
     foreach ($item in $UpdateCollection) { $item.IsSelected = $true }
     $Sync.UpdateList.Items.Refresh()
 })
 
-# Main Install Logic
 $Sync.BtnInstall.Add_Click({
     $Selected = $UpdateCollection | Where-Object { $_.IsSelected -eq $true }
     if ($Selected.Count -eq 0) { return }
@@ -110,35 +99,28 @@ $Sync.BtnInstall.Add_Click({
         $UpdatesToProcess = New-Object -ComObject Microsoft.Update.UpdateColl
         foreach ($s in $Selected) { $UpdatesToProcess.Add($s.UpdateObj) | Out-Null }
 
-        # Download Phase
+        # Download
         $Downloader = $UpdateSession.CreateUpdateDownloader()
         $Downloader.Updates = $UpdatesToProcess
         $Downloader.Download() | Out-Null
 
         $Sync.Window.Dispatcher.Invoke([action]{ $Sync.StatusLabel.Text = "Status: Installing..." })
 
-        # Install Phase
+        # Install
         $Installer = $UpdateSession.CreateUpdateInstaller()
         $Installer.Updates = $UpdatesToProcess
         $Result = $Installer.Install()
 
-        # UI Callback after completion
         $Sync.Window.Dispatcher.Invoke([action]{ 
-            $Sync.StatusLabel.Text = "Status: Finished. Code: $($Result.ResultCode)"
+            $Sync.StatusLabel.Text = "Status: Finished. Result Code: $($Result.ResultCode)"
             $Sync.StatusLabel.Foreground = "Green"
             $Sync.BtnInstall.IsEnabled = $true
-            
-            if ($Result.RebootRequired) {
-                $Sync.BtnReboot.Visibility = "Visible"
-                [System.Windows.MessageBox]::Show("Updates complete. A reboot is required to finish installation.")
-            } else {
-                [System.Windows.MessageBox]::Show("Installation Finished. No reboot required.")
-            }
+            [System.Windows.MessageBox]::Show("Installation Finished.")
         })
     })
     
     $Powershell.Runspace = $Runspace
-    $Powershell.BeginInvoke()
+    $Powershell.BeginInvoke() # This runs the code in the background!
 })
 
 $Window.ShowDialog() | Out-Null
