@@ -1,0 +1,114 @@
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+
+# --- XAML UI Definition (Updated with Status Label) ---
+[xml]$xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        Title="PowerShell Update Manager" Height="550" Width="750" WindowStartupLocation="CenterScreen" Background="#F0F0F0">
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        
+        <TextBlock Text="Available Windows Updates" FontSize="18" FontWeight="Bold" Margin="0,0,0,10"/>
+
+        <ListView Name="UpdateList" Grid.Row="1" SelectionMode="Extended">
+            <ListView.View>
+                <GridView>
+                    <GridViewColumn Header="Install" Width="50">
+                        <GridViewColumn.CellTemplate>
+                            <DataTemplate>
+                                <CheckBox IsChecked="{Binding IsSelected}" HorizontalAlignment="Center"/>
+                            </DataTemplate>
+                        </GridViewColumn.CellTemplate>
+                    </GridViewColumn>
+                    <GridViewColumn Header="Title" DisplayMemberBinding="{Binding Title}" Width="450"/>
+                    <GridViewColumn Header="Category" DisplayMemberBinding="{Binding Category}" Width="150"/>
+                </GridView>
+            </ListView.View>
+        </ListView>
+
+        <TextBlock Name="StatusLabel" Grid.Row="2" Text="Ready" Foreground="Blue" Margin="0,10,0,0" FontWeight="SemiBold"/>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
+            <Button Name="BtnRecommend" Content="Recommend" Width="110" Height="30" Margin="5"/>
+            <Button Name="BtnSelectAll" Content="Select All" Width="110" Height="30" Margin="5"/>
+            <Button Name="BtnInstall" Content="Install Selected" Width="130" Height="30" Margin="5" Background="#FF4CAF50" Foreground="White" FontWeight="Bold"/>
+        </StackPanel>
+    </Grid>
+</Window>
+"@
+
+# --- Load XAML ---
+$reader = New-Object System.Xml.XmlNodeReader $xaml
+$Window = [Windows.Markup.XamlReader]::Load($reader)
+
+# --- Map UI Elements ---
+$UpdateList = $Window.FindName("UpdateList")
+$BtnRecommend = $Window.FindName("BtnRecommend")
+$BtnSelectAll = $Window.FindName("BtnSelectAll")
+$BtnInstall = $Window.FindName("BtnInstall")
+$StatusLabel = $Window.FindName("StatusLabel")
+
+# --- Fetch Updates ---
+Write-Host "Searching for updates..." -ForegroundColor Cyan
+$UpdateSession = New-Object -ComObject Microsoft.Update.Session
+$UpdateSearcher = $UpdateSession.CreateUpdateSearcher()
+$SearchResult = $UpdateSearcher.Search("IsInstalled=0 and IsHidden=0")
+$UpdateCollection = New-Object System.Collections.ObjectModel.ObservableCollection[Object]
+
+foreach ($update in $SearchResult.Updates) {
+    $categories = ($update.Categories | Select-Object -ExpandProperty Name) -join ", "
+    $UpdateCollection.Add([PSCustomObject]@{ IsSelected = $false; Title = $update.Title; Category = $categories; UpdateObj = $update })
+}
+$UpdateList.ItemsSource = $UpdateCollection
+
+# --- Button Logic ---
+
+$BtnRecommend.Add_Click({
+    foreach ($item in $UpdateCollection) { $item.IsSelected = ($item.Category -match "Security|Critical") }
+    $UpdateList.Items.Refresh()
+})
+
+$BtnSelectAll.Add_Click({
+    foreach ($item in $UpdateCollection) { $item.IsSelected = $true }
+    $UpdateList.Items.Refresh()
+})
+
+$BtnInstall.Add_Click({
+    $Selected = $UpdateCollection | Where-Object { $_.IsSelected -eq $true }
+    if ($Selected.Count -eq 0) { return }
+
+    $BtnInstall.IsEnabled = $false
+    $StatusLabel.Text = "Status: Downloading..."
+    $StatusLabel.Foreground = "Orange"
+
+    # Create collection for COM object
+    $UpdatesToProcess = New-Object -ComObject Microsoft.Update.UpdateColl
+    foreach ($s in $Selected) { $UpdatesToProcess.Add($s.UpdateObj) | Out-Null }
+
+    # Download
+    $Downloader = $UpdateSession.CreateUpdateDownloader()
+    $Downloader.Updates = $UpdatesToProcess
+    $Downloader.Download() | Out-Null
+
+    # Install
+    $StatusLabel.Text = "Status: Installing..."
+    $Installer = $UpdateSession.CreateUpdateInstaller()
+    $Installer.Updates = $UpdatesToProcess
+    $Result = $Installer.Install()
+
+    $StatusLabel.Text = "Status: Finished. Result Code: $($Result.ResultCode)"
+    $StatusLabel.Foreground = "Green"
+    
+    if ($Result.RebootRequired) { 
+        [System.Windows.MessageBox]::Show("Installation complete. A REBOOT IS REQUIRED.") 
+    } else {
+        [System.Windows.MessageBox]::Show("Installation complete.")
+    }
+    $BtnInstall.IsEnabled = $true
+})
+
+$Window.ShowDialog() | Out-Null
